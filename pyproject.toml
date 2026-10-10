@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lichess-game-analyzer"
+version = "0.1.0"
+description = "Fetch and summarize your Lichess games"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["python-chess", "python-dotenv"]
+
+[project.scripts]
+lichess-analyzer = "lichess_analyzer.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["lichess_analyzer*"]
