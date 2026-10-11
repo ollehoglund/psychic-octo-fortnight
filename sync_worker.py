@@ -1,5 +1,4 @@
-
-"""Download new games and analyze only games not already cached."""
+"""Download new Lichess games and analyze games not already cached."""
 
 from __future__ import annotations
 
@@ -32,6 +31,7 @@ def run_sync(
         raise ValueError("Check STOCKFISH_PATH in your .env file.")
 
     print(f"Downloading recent games for {username}...")
+
     pgn_text = fetch_user_games(
         username,
         max_games=max_games,
@@ -42,7 +42,11 @@ def run_sync(
     added = save_new_games(username, pgn_text)
     print(f"Downloaded games saved. Newly imported: {added}")
 
-    pending = get_unanalyzed_games(username)
+    pending = get_unanalyzed_games(
+        username,
+        opponent=opponent,
+    )
+
     print(f"Games awaiting analysis: {len(pending)}")
 
     for index, game in enumerate(pending, start=1):
@@ -70,18 +74,16 @@ def run_sync(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+
+    parser.add_argument("--max-games", type=int, default=40)
+    parser.add_argument("--engine-time", type=float, default=0.1)
     parser.add_argument(
-        "--max-games", type=int, default=40
+        "--opponent",
+        type=str,
+        default=None,
+        help="Only download and analyze games against this Lichess username",
     )
-    parser.add_argument(
-        "--engine-time", type=float, default=0.1
-    )
-    parser.add_argument(
-    "--opponent",
-    type=str,
-    default=None,
-    help="Only download and analyze games against this Lichess username",
-)
+
     args = parser.parse_args()
 
     load_dotenv()
@@ -95,6 +97,7 @@ if __name__ == "__main__":
             username,
             max_games=args.max_games,
             engine_time=args.engine_time,
+            opponent=args.opponent,
         )
     except (
         ValueError,
