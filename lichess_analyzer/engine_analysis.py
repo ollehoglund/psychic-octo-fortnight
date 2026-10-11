@@ -1,4 +1,10 @@
-"""Analyze chess games with Stockfish and identify costly moves."""
+
+"""Analyze chess games with Stockfish and identify costly moves.
+
+Centipawn losses and forced-mate changes are handled separately.
+A mate-related mistake has eval_loss_cp=None rather than a fabricated
+large centipawn value.
+"""
 
 from __future__ import annotations
 
@@ -18,7 +24,60 @@ class CriticalMistake:
     move_number: int
     played_move: str
     best_move: str
-    eval_loss_cp: int
+    eval_loss_cp: int | None
+    mate_related: bool = False
+    mate_in_before: int | None = None
+    mate_in_after: int | None = None
+
+
+def assess_loss(
+    before: chess.engine.PovScore,
+    after: chess.engine.PovScore,
+    threshold_cp: int,
+) -> tuple[int | None, bool, int | None, int | None]:
+    """Return centipawn loss, mate flag, and signed mate scores.
+
+    Scores are expressed from the perspective of the player who made
+    the move. Positive mate values mean that player can force mate;
+    negative values mean their opponent can force mate.
+    """
+    before_mate = before.mate()
+    after_mate = after.mate()
+
+    # Only compare centipawns when neither position has a mate score.
+    if before_mate is None and after_mate is None:
+        before_cp = before.score()
+        after_cp = after.score()
+
+        if before_cp is None or after_cp is None:
+            return None, False, None, None
+
+        loss = before_cp - after_cp
+        if loss >= threshold_cp:
+            return loss, False, None, None
+
+        return None, False, None, None
+
+    # A move is mate-related when it worsens the forced-mate outcome:
+    # - gives the opponent a forced mate;
+    # - throws away our own forced mate;
+    # - allows an existing forced mate against us to arrive sooner.
+    mate_blunder = False
+
+    if after_mate is not None and after_mate < 0:
+        if before_mate is None or before_mate >= 0:
+            mate_blunder = True
+        elif abs(after_mate) < abs(before_mate):
+            mate_blunder = True
+
+    if before_mate is not None and before_mate > 0:
+        if after_mate is None or after_mate <= 0:
+            mate_blunder = True
+
+    if mate_blunder:
+        return None, True, before_mate, after_mate
+
+    return None, False, before_mate, after_mate
 
 
 def analyze_games_with_engine(
@@ -28,7 +87,7 @@ def analyze_games_with_engine(
     seconds_per_position: float = 0.2,
     threshold_cp: int = 200,
 ) -> list[CriticalMistake]:
-    """Find moves that worsen the position by at least threshold_cp."""
+    """Find significant centipawn losses and mate-related blunders."""
 
     username = username.strip()
     if not username:
@@ -38,15 +97,21 @@ def analyze_games_with_engine(
 
     mistakes: list[CriticalMistake] = []
     stream = StringIO(pgn_text)
-    game_number = 0
 
     with chess.engine.SimpleEngine.popen_uci(engine_path) as engine:
+        game_number = 0
+
         while game := chess.pgn.read_game(stream):
             game_number += 1
-            print(f"Stockfish: analyzing game {game_number}...", flush=True)
+            print(
+                f"Stockfish: analyzing game {game_number}...",
+                flush=True,
+            )
 
             if game.errors:
-                raise ValueError(f"Could not parse PGN: {game.errors[0]}")
+                raise ValueError(
+                    f"Could not parse PGN: {game.errors[0]}"
+                )
 
             headers = game.headers
             white = headers.get("White", "")
@@ -60,7 +125,10 @@ def analyze_games_with_engine(
 
             user_color = chess.WHITE if is_white else chess.BLACK
             opponent = black if is_white else white
-            date = headers.get("UTCDate", headers.get("Date", "Unknown date"))
+            date = headers.get(
+                "UTCDate",
+                headers.get("Date", "Unknown date"),
+            )
 
             board = game.board()
             pending = None
@@ -71,14 +139,20 @@ def analyze_games_with_engine(
 
                 after_score = after_info["score"].pov(
                     pending["color"]
-                ).score(mate_score=10000)
+                )
 
-                if after_score is None:
-                    return
+                loss_cp, mate_related, mate_before, mate_after = (
+                    assess_loss(
+                        pending["before_score"],
+                        after_score,
+                        threshold_cp,
+                    )
+                )
 
-                loss = pending["before_score"] - after_score
-
-                if pending["color"] == user_color and loss >= threshold_cp:
+                if (
+                    pending["color"] == user_color
+                    and (loss_cp is not None or mate_related)
+                ):
                     mistakes.append(
                         CriticalMistake(
                             date=date,
@@ -87,7 +161,10 @@ def analyze_games_with_engine(
                             move_number=pending["move_number"],
                             played_move=pending["played_move"],
                             best_move=pending["best_move"],
-                            eval_loss_cp=loss,
+                            eval_loss_cp=loss_cp,
+                            mate_related=mate_related,
+                            mate_in_before=mate_before,
+                            mate_in_after=mate_after,
                         )
                     )
 
@@ -97,14 +174,13 @@ def analyze_games_with_engine(
                     chess.engine.Limit(time=seconds_per_position),
                 )
 
+                # Evaluate the previous move using the new position.
                 record_if_significant(info)
 
-                score = info["score"].pov(board.turn).score(
-                    mate_score=10000
-                )
+                score = info["score"].pov(board.turn)
                 pv = info.get("pv", [])
 
-                if score is None or not pv:
+                if not pv:
                     pending = None
                 else:
                     pending = {
@@ -124,8 +200,12 @@ def analyze_games_with_engine(
                 )
                 record_if_significant(final_info)
 
+    # Mate-related blunders first, then ordinary centipawn losses.
     return sorted(
         mistakes,
-        key=lambda mistake: mistake.eval_loss_cp,
+        key=lambda mistake: (
+            mistake.mate_related,
+            mistake.eval_loss_cp or 0,
+        ),
         reverse=True,
     )

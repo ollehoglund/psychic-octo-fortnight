@@ -13,6 +13,18 @@ import chess.pgn
 
 DB_PATH = Path(__file__).resolve().parent.parent / "lichess_games.sqlite3"
 
+def is_standard_chess_pgn(pgn_text: str) -> bool:
+    """Accept standard chess only; reject recognized variants."""
+    from io import StringIO
+
+    game = chess.pgn.read_game(StringIO(pgn_text))
+
+    if game is None or game.errors:
+        return False
+
+    # python-chess creates a variant-specific board for variant PGNs.
+    return type(game.board()) is chess.Board
+
 
 def connect():
     connection = sqlite3.connect(DB_PATH, timeout=30)
@@ -85,6 +97,8 @@ def save_new_games(username: str, pgn_text: str) -> int:
 
     with connect() as db:
         for game in split_pgn(pgn_text):
+            if not is_standard_chess_pgn(game["pgn"]):
+                continue
             cursor = db.execute(
                 """
                 INSERT OR IGNORE INTO games
@@ -121,8 +135,10 @@ def get_games(username: str) -> list[dict]:
 
     return [dict(row) for row in rows]
 
-
-def get_unanalyzed_games(username: str) -> list[dict]:
+def get_unanalyzed_games(
+    username: str,
+    opponent: str | None = None,
+) -> list[dict]:
     initialize_database()
 
     with connect() as db:
@@ -135,8 +151,20 @@ def get_unanalyzed_games(username: str) -> list[dict]:
             (username.casefold(),),
         ).fetchall()
 
-    return [dict(row) for row in rows]
+    games = [
+        dict(row)
+        for row in rows
+        if is_standard_chess_pgn(row["pgn"])
+    ]
 
+    if opponent:
+        target = opponent.strip().casefold()
+        games = [
+            game for game in games
+            if game["opponent"].casefold() == target
+        ]
+
+    return games
 
 def save_analysis(game_key: str, mistakes: list[dict]) -> None:
     now = datetime.now(timezone.utc).isoformat()
@@ -161,6 +189,9 @@ def get_saved_mistakes(username: str) -> list[dict]:
 
     return sorted(
         mistakes,
-        key=lambda item: item.get("eval_loss_cp", 0),
+        key=lambda item: (
+            bool(item.get("mate_related", False)),
+            int(item.get("eval_loss_cp") or 0),
+        ),
         reverse=True,
     )

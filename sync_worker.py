@@ -23,6 +23,7 @@ def run_sync(
     username: str,
     max_games: int = 40,
     engine_time: float = 0.1,
+    opponent: str | None = None,
 ) -> None:
     load_dotenv()
 
@@ -35,6 +36,7 @@ def run_sync(
         username,
         max_games=max_games,
         token=os.environ.get("LICHESS_TOKEN"),
+        opponent=opponent,
     )
 
     added = save_new_games(username, pgn_text)
@@ -74,6 +76,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--engine-time", type=float, default=0.1
     )
+    parser.add_argument(
+    "--opponent",
+    type=str,
+    default=None,
+    help="Only download and analyze games against this Lichess username",
+)
     args = parser.parse_args()
 
     load_dotenv()

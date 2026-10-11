@@ -14,6 +14,8 @@ from lichess_analyzer.storage import (
 )
 from sync_worker import run_sync
 
+from lichess_analyzer.trends import trends_report
+
 
 load_dotenv()
 initialize_database()
@@ -42,7 +44,7 @@ with st.sidebar:
     max_games = st.number_input(
         "Games to download",
         min_value=1,
-        max_value=500,
+        max_value=10000,
         value=40,
         step=10,
     )
@@ -124,10 +126,14 @@ st.divider()
 # -------------------------
 # Tabs
 # -------------------------
-overview_tab, games_tab, mistakes_tab = st.tabs(
-    ["📊 Overview", "♟️ Game history", "🔎 Stockfish findings"]
-)
-
+overview_tab, games_tab, mistakes_tab, trends_tab = st.tabs(
+    [
+        "📊 Overview",
+        "♟️ Game history",
+        "🔎 Stockfish findings",
+        "📈 Trends & Training",
+    ]
+    )
 
 # -------------------------
 # Overview / readable summary
@@ -286,6 +292,9 @@ with mistakes_tab:
             "played_move": "Move played",
             "best_move": "Engine suggestion",
             "fen": "Position",
+            "mate_related": "Mate-related blunder",
+            "mate_in_before": "Mate score before",
+            "mate_in_after": "Mate score after",
         }
 
         df = df.rename(columns={
@@ -315,6 +324,229 @@ with mistakes_tab:
             "Positions involving forced mates may need special interpretation."
         )
 
+# -------------------------
+# Trends and training
+# -------------------------
+with trends_tab:
+    st.subheader("Your chess trends")
+    st.caption(
+        "These trends use saved game summaries and saved Stockfish findings. "
+        "They do not run a new engine analysis."
+    )
+
+    report = analyze_pgn(
+        "\n\n".join(game["pgn"] for game in games),
+        username,
+    )
+
+    trends = trends_report(report, mistakes)
+
+    st.markdown("### Performance by color")
+
+    color_cols = st.columns(2)
+    for col, color in zip(color_cols, ("White", "Black")):
+        stats = trends["by_color"][color]
+        with col:
+            st.markdown(f"#### {color}")
+            st.metric("Games", stats["games"])
+            if stats["score_pct"] is not None:
+                st.metric("Score", f"{stats['score_pct']:.1f}%")
+                st.caption(
+                    f"{stats['wins']} wins · {stats['draws']} draws · "
+                    f"{stats['losses']} losses"
+                )
+            else:
+                st.caption("Not enough completed results yet.")
+
+
+    # -------------------------
+    # Recent vs older games
+    # -------------------------
+    st.markdown("### Are you improving over time?")
+
+    periods = trends["period_comparison"]
+    older = periods["Older games"]
+    recent = periods["Recent games"]
+
+    if older["games"] and recent["games"]:
+        st.caption(
+            f"Older: {older['first_date']} to {older['last_date']} "
+            f"({older['games']} games) · "
+            f"Recent: {recent['first_date']} to {recent['last_date']} "
+            f"({recent['games']} games)"
+        )
+
+        left, right = st.columns(2)
+
+        with left:
+            st.markdown("#### Older games")
+            st.metric(
+                "Score",
+                f"{older['score_pct']:.1f}%"
+                if older["score_pct"] is not None else "N/A",
+            )
+            st.metric(
+                "Critical mistakes per 100 moves",
+                f"{older['mistakes_per_100_moves']:.2f}"
+                if older["mistakes_per_100_moves"] is not None else "N/A",
+            )
+            st.caption(
+                f"{older['critical_mistakes']} saved critical findings "
+                f"across {older['own_moves']} estimated moves."
+            )
+
+        with right:
+            st.markdown("#### Recent games")
+            st.metric(
+                "Score",
+                f"{recent['score_pct']:.1f}%"
+                if recent["score_pct"] is not None else "N/A",
+            )
+            st.metric(
+                "Critical mistakes per 100 moves",
+                f"{recent['mistakes_per_100_moves']:.2f}"
+                if recent["mistakes_per_100_moves"] is not None else "N/A",
+            )
+            st.caption(
+                f"{recent['critical_mistakes']} saved critical findings "
+                f"across {recent['own_moves']} estimated moves."
+            )
+    else:
+        st.info(
+            "More dated games are needed to compare older and recent periods."
+        )
+
+    # -------------------------
+    # Mistake rates by color
+    # -------------------------
+    st.markdown("### Mistake patterns: White vs Black")
+
+    color_rows = []
+    for color in ("White", "Black"):
+        stats = trends["by_color"][color]
+        color_rows.append({
+            "Color": color,
+            "Games": stats["games"],
+            "Score %": (
+                round(stats["score_pct"], 1)
+                if stats["score_pct"] is not None else None
+            ),
+            "Critical findings": stats["critical_mistakes"],
+            "Findings per 100 moves": (
+                round(stats["mistakes_per_100_moves"], 2)
+                if stats["mistakes_per_100_moves"] is not None else None
+            ),
+            "Combined CP loss (pawns)": stats["combined_loss_pawns"],
+        })
+
+    st.dataframe(
+        pd.DataFrame(color_rows),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.caption(
+        "These rates count saved critical Stockfish findings, not every "
+        "inaccuracy. Small samples can make color differences misleading."
+    )
+
+    # -------------------------
+    # Long-term trends
+    # -------------------------
+    st.markdown("### Long-term progress")
+
+    monthly_rows = trends["monthly"]
+    if monthly_rows:
+        monthly_df = pd.DataFrame(monthly_rows).set_index("Month")
+
+        st.markdown("#### Score by month")
+        st.line_chart(monthly_df[["Score %"]])
+
+        st.markdown("#### Critical findings per 100 moves")
+        st.line_chart(monthly_df[["Mistakes per 100 moves"]])
+
+        with st.expander("View monthly data"):
+            st.dataframe(
+                monthly_df.reset_index(),
+                use_container_width=True,
+                hide_index=True,
+            )
+    else:
+        st.info(
+            "No usable game dates were found for a monthly trend. "
+            "Check whether your saved PGNs contain valid dates."
+        )
+
+    opening_rows = trends["openings"]
+    if opening_rows:
+        st.dataframe(
+            pd.DataFrame(opening_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.caption(
+            "Openings with fewer than five games are preliminary. "
+            "Results depend on opponent strength and time control."
+        )
+    else:
+        st.info(
+            "Opening names are missing from your PGNs. "
+            "Sync more games with opening headers to build this report."
+        )
+
+    st.markdown("### When do critical mistakes happen?")
+
+    phase_df = pd.DataFrame(trends["phases"])
+    st.dataframe(
+        phase_df,
+        use_container_width=True,
+        hide_index=True,
+    )
+    st.caption(
+        "Phases are approximated by move number, not by the actual "
+        "material or strategic stage of the position. These are saved "
+        "critical mistakes, not all errors in your games."
+    )
+
+    st.markdown("### Biggest saved mistakes")
+
+    biggest = trends["biggest_mistakes"]
+    if biggest:
+        mistake_rows = []
+        for mistake in biggest:
+            mistake_rows.append({
+                "Date": mistake.get("date", ""),
+                "Opponent": mistake.get("opponent", ""),
+                "Move": mistake.get("move_number", ""),
+                "Your move": mistake.get("played_move", ""),
+                "Engine suggestion": mistake.get("best_move", ""),
+                "Evaluation loss (pawns)": 
+                    (
+                    round(int(mistake["eval_loss_cp"]) / 100, 2)
+                    if mistake.get("eval_loss_cp") is not None
+                    else None
+                    ),
+                "Mate-related": "Yes" if mistake.get("mate_related") else "No",
+                "Mate before (signed)": mistake.get("mate_in_before"),
+                "Mate after (signed)": mistake.get("mate_in_after"),
+            })
+
+        st.dataframe(
+            pd.DataFrame(mistake_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info(
+            "No saved critical mistakes yet. Run the manual sync to "
+            "analyze games that have not been analyzed."
+        )
+
+    st.markdown("### Training priorities")
+
+    for index, priority in enumerate(trends["priorities"], start=1):
+        st.markdown(f"**{index}.** {priority}")
+    
 
 st.divider()
 st.caption(
